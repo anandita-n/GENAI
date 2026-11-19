@@ -1,0 +1,995 @@
+/**
+ * Signet — Every sign has something to say
+ * Frontend controller: WebRTC, MediaPipe hand tracking, REST classification,
+ * Generative AI sentence refinement, Web Speech TTS, ASL Guide with images.
+ */
+
+// ─── Application State ───────────────────────────────────────────────────────
+const state = {
+  cameraActive:     false,
+  stream:           null,
+  hands:            null,
+  camera:           null,
+  isMirrored:       true,
+  detectorMode:     "client_mediapipe",
+  selectedStyle:    "casual",
+  confidenceThreshold: 0.35,
+  stabilityFrames:  4,
+  geminiKey:        "",
+  selectedVoice:    "Samantha",
+  lastPrediction:   null,
+  fpsCounter:       { frames: 0, lastTime: performance.now(), fps: 0 },
+  translationHistory: []
+};
+
+// ─── DOM Elements ─────────────────────────────────────────────────────────────
+const elements = {
+  // Tabs
+  navTabs:  document.querySelectorAll(".nav-tab"),
+  tabPanes: document.querySelectorAll(".tab-pane"),
+
+  // Status
+  backendStatus:    document.getElementById("backend-status-text"),
+  geminiDot:        document.getElementById("gemini-dot"),
+  geminiStatus:     document.getElementById("gemini-status-text"),
+
+  // Video & Prediction
+  video:            document.getElementById("webcam-video"),
+  canvas:           document.getElementById("overlay-canvas"),
+  toggleCameraBtn:  document.getElementById("toggle-camera-btn"),
+  flipCameraBtn:    document.getElementById("flip-camera-btn"),
+  cameraModeSelect: document.getElementById("camera-mode-select"),
+  fpsBadge:         document.getElementById("fps-badge"),
+  handStatusBadge:  document.getElementById("hand-status-badge"),
+  predictedChar:    document.getElementById("predicted-char"),
+  commitDetectedBtn:document.getElementById("commit-detected-btn"),
+  holdRingCircle:   document.getElementById("hold-ring-circle"),
+  holdStatusLabel:  document.getElementById("hold-status-label"),
+  confidencePct:    document.getElementById("confidence-pct"),
+  stabilityPct:     document.getElementById("stability-pct"),
+  candidatesContainer: document.getElementById("candidates-container"),
+
+  // Workspace & Buffer
+  charStreamTokens: document.getElementById("char-stream-tokens"),
+  fullTextInput:    document.getElementById("full-text-input"),
+  actionSpaceBtn:   document.getElementById("action-space-btn"),
+  actionBackspaceBtn: document.getElementById("action-backspace-btn"),
+  actionClearBtn:   document.getElementById("action-clear-btn"),
+  demoPhraseBtn:    document.getElementById("demo-phrase-btn"),
+
+  // Generative AI
+  styleChips:         document.querySelectorAll(".style-chip"),
+  refineAiBtn:        document.getElementById("refine-ai-btn"),
+  activeLlmTag:       document.getElementById("active-llm-tag"),
+  refinedResultCard:  document.getElementById("refined-result-card"),
+  refinedTextContent: document.getElementById("refined-text-content"),
+  replyChipsList:     document.getElementById("reply-chips-list"),
+  copyRefinedBtn:     document.getElementById("copy-refined-btn"),
+  speakRefinedBtn:    document.getElementById("speak-refined-btn"),
+
+  // Evaluation
+  metricAccuracy:          document.getElementById("metric-accuracy"),
+  metricPrecision:         document.getElementById("metric-precision"),
+  metricRecall:            document.getElementById("metric-recall"),
+  metricF1:                document.getElementById("metric-f1"),
+  metricLatency:           document.getElementById("metric-latency"),
+  confusionMatrixContainer:document.getElementById("confusion-matrix-container"),
+  perClassTbody:           document.getElementById("per-class-tbody"),
+  retrainModelBtn:         document.getElementById("retrain-model-btn"),
+
+  // Alphabet & History
+  alphabetGridContainer: document.getElementById("alphabet-grid-container"),
+  historyListContainer:  document.getElementById("history-list-container"),
+  exportHistoryBtn:      document.getElementById("export-history-json-btn"),
+  clearHistoryBtn:       document.getElementById("clear-history-btn"),
+
+  // Settings Modal
+  settingsModal:          document.getElementById("settings-modal"),
+  openSettingsBtn:        document.getElementById("open-settings-btn"),
+  closeSettingsBtn:       document.getElementById("close-settings-btn"),
+  cancelSettingsBtn:      document.getElementById("cancel-settings-btn"),
+  saveSettingsBtn:        document.getElementById("save-settings-btn"),
+  settingGeminiKey:       document.getElementById("setting-gemini-key"),
+  settingConfThreshold:   document.getElementById("setting-conf-threshold"),
+  confValLabel:           document.getElementById("conf-val-label"),
+  settingStabilityFrames: document.getElementById("setting-stability-frames"),
+  stabValLabel:           document.getElementById("stab-val-label"),
+  settingTtsVoice:        document.getElementById("setting-tts-voice")
+};
+
+// ─── Hand topology ────────────────────────────────────────────────────────────
+const HAND_CONNECTIONS = [
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [9, 10], [10, 11], [11, 12],
+  [13, 14], [14, 15], [15, 16],
+  [0, 17], [17, 18], [18, 19], [19, 20],
+  [5, 9], [9, 13], [13, 17]
+];
+
+// Warm botanical palette — matches the site colours
+const FINGER_COLORS = {
+  thumb:  "#a44a3f",   // terracotta
+  index:  "#5a8a60",   // sage green
+  middle: "#8a7060",   // warm brown
+  ring:   "#f19c79",   // peach
+  pinky:  "#cbdfbd",   // light sage
+  palm:   "#c8bfaa"    // warm bone
+};
+
+// ─── ASL Guide data ──────────────────────────────────────────────────────────
+const ASL_GUIDE_DATA = {
+  "A": "Closed fist with thumb resting against index finger side.",
+  "B": "Four fingers straight up together, thumb folded across palm.",
+  "C": "All fingers curved outward in a smooth C-cup shape.",
+  "D": "Index finger up; middle, ring, pinky curved to meet thumb tip.",
+  "E": "All fingers curled down, fingertips resting on thumb edge.",
+  "F": "Index and thumb form an 'O'; middle, ring, pinky extend up.",
+  "G": "Index pointing forward horizontally, thumb parallel above.",
+  "H": "Index and middle fingers extended forward horizontally.",
+  "I": "Pinky extended up; other fingers in fist, thumb across.",
+  "J": "Pinky up, sweeping downward in a 'J' arc.",
+  "K": "Index up, middle at 45°, thumb between them.",
+  "L": "Index pointing up, thumb out at 90° — L-shape.",
+  "M": "Fist, thumb tucked under index, middle and ring fingers.",
+  "N": "Fist, thumb tucked under index and middle fingers.",
+  "O": "Fingers curved inward, tips touching thumb — an 'O'.",
+  "P": "K-shape held inverted, pointing downward.",
+  "Q": "G-shape held inverted, pointing downward.",
+  "R": "Index and middle fingers crossed, held straight up.",
+  "S": "Closed fist, thumb wrapped across the front of fingers.",
+  "T": "Fist, thumb poking up between index and middle knuckles.",
+  "U": "Index and middle fingers straight up together.",
+  "V": "Index and middle fingers spread apart — peace sign.",
+  "W": "Index, middle and ring fingers spread and straight up.",
+  "X": "Index finger bent into a hook; other fingers closed.",
+  "Y": "Thumb and pinky extended wide; middle three curled.",
+  "Z": "Index finger traces a 'Z' path in the air.",
+  "SPACE": "Flat open hand held forward — word separator.",
+  "DEL":   "Closed fist with a flick — erases previous letter.",
+  "CLEAR": "Open palm waving side to side — clears all text."
+};
+
+// Real ASL fingerspelling photos from Lifeprint / ASL University (CC educational use)
+const ASL_IMAGE_URLS = (() => {
+  const base = "https://www.lifeprint.com/asl101/fingerspelling/images/";
+  const map = {};
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").forEach(l => {
+    map[l] = `${base}${l.toLowerCase()}.jpg`;
+  });
+  // For special tokens — use a neutral reference
+  map["SPACE"] = `${base}space.gif`;
+  map["DEL"]   = "";
+  map["CLEAR"] = "";
+  return map;
+})();
+
+
+/* ════════════════════════════════════════════════════════════════
+   1. Initialization & Event Listeners
+════════════════════════════════════════════════════════════════ */
+
+document.addEventListener("DOMContentLoaded", () => {
+  setupNavigation();
+  setupSettingsModal();
+  setupBufferActions();
+  setupGenerativeAiActions();
+  setupSpeechVoices();
+  loadSystemStatus();
+  loadEvaluationMetrics();
+  renderAlphabetGuide();
+  loadTranslationHistory();
+
+  // Camera mode change
+  elements.cameraModeSelect.addEventListener("change", (e) => {
+    state.detectorMode = e.target.value;
+  });
+
+  // Quick alphabet strip
+  renderQuickAlphabetStrip();
+
+  // Commit button & click on badge
+  if (elements.commitDetectedBtn) {
+    elements.commitDetectedBtn.addEventListener("click", commitCurrentSign);
+  }
+  elements.predictedChar.addEventListener("click", commitCurrentSign);
+
+  // Camera
+  elements.toggleCameraBtn.addEventListener("click", toggleCamera);
+  elements.flipCameraBtn.addEventListener("click", () => {
+    state.isMirrored = !state.isMirrored;
+    elements.video.style.transform  = state.isMirrored ? "scaleX(-1)" : "scaleX(1)";
+    elements.canvas.style.transform = state.isMirrored ? "scaleX(-1)" : "scaleX(1)";
+  });
+
+  // Keyboard shortcut: Spacebar commits sign when not typing
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "Space" && document.activeElement !== elements.fullTextInput) {
+      e.preventDefault();
+      commitCurrentSign();
+    }
+  });
+
+  // Sync manual text edits to backend buffer
+  elements.fullTextInput.addEventListener("input", (e) => {
+    fetch("/api/buffer/set", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: e.target.value })
+    }).catch(console.error);
+  });
+});
+
+
+/* ════════════════════════════════════════════════════════════════
+   2. Tab Navigation
+════════════════════════════════════════════════════════════════ */
+
+function setupNavigation() {
+  elements.navTabs.forEach(tab => {
+    tab.addEventListener("click", () => {
+      const targetTab = tab.getAttribute("data-tab");
+      elements.navTabs.forEach(t  => t.classList.remove("active"));
+      elements.tabPanes.forEach(p => p.classList.remove("active"));
+      tab.classList.add("active");
+      const pane = document.getElementById(`tab-${targetTab}`);
+      if (pane) pane.classList.add("active");
+    });
+  });
+}
+
+
+/* ════════════════════════════════════════════════════════════════
+   3. Camera & Hand Landmark Tracking
+════════════════════════════════════════════════════════════════ */
+
+async function toggleCamera() {
+  state.cameraActive ? stopCamera() : await startCamera();
+}
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+      audio: false
+    });
+
+    state.stream = stream;
+    elements.video.srcObject = stream;
+    await elements.video.play();
+
+    elements.canvas.width  = elements.video.videoWidth  || 640;
+    elements.canvas.height = elements.video.videoHeight || 480;
+
+    state.cameraActive = true;
+    elements.toggleCameraBtn.innerHTML = `<span>⏹️</span> Stop Camera`;
+    elements.toggleCameraBtn.style.background = "linear-gradient(135deg, #c0392b, #96281b)";
+
+    if (!state.hands && window.Hands) initClientMediaPipe();
+    startFrameLoop();
+  } catch (err) {
+    console.error("Camera access error:", err);
+    alert("Could not access camera: " + err.message + "\nPlease verify camera permissions.");
+  }
+}
+
+function stopCamera() {
+  if (state.stream) {
+    state.stream.getTracks().forEach(t => t.stop());
+    state.stream = null;
+  }
+  elements.video.srcObject = null;
+  state.cameraActive = false;
+  elements.toggleCameraBtn.innerHTML = `<span>📹</span> Start Camera`;
+  elements.toggleCameraBtn.style.background = "";
+  elements.fpsBadge.textContent = "0 FPS";
+  elements.handStatusBadge.textContent = "Camera Off";
+  const ctx = elements.canvas.getContext("2d");
+  ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+}
+
+function initClientMediaPipe() {
+  try {
+    if (!window.Hands) {
+      console.warn("[MediaPipe] Hands not in window — using backend LiteRT.");
+      state.detectorMode = "backend_mediapipe";
+      if (elements.cameraModeSelect) elements.cameraModeSelect.value = "backend_mediapipe";
+      return;
+    }
+    state.hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+    state.hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.45,
+      minTrackingConfidence: 0.45
+    });
+    state.hands.onResults(onMediaPipeResults);
+  } catch (e) {
+    console.warn("[MediaPipe] Fallback to backend:", e);
+    state.detectorMode = "backend_mediapipe";
+    if (elements.cameraModeSelect) elements.cameraModeSelect.value = "backend_mediapipe";
+  }
+}
+
+let isProcessingFrame = false;
+
+function startFrameLoop() {
+  async function frameStep() {
+    if (!state.cameraActive) return;
+    calculateFPS();
+
+    if (state.detectorMode === "client_mediapipe" && state.hands) {
+      if (!isProcessingFrame && elements.video.readyState >= 2) {
+        isProcessingFrame = true;
+        try {
+          await state.hands.send({ image: elements.video });
+        } catch (err) {
+          console.warn("Client MediaPipe error — falling back to backend:", err);
+          state.detectorMode = "backend_mediapipe";
+          if (elements.cameraModeSelect) elements.cameraModeSelect.value = "backend_mediapipe";
+        }
+        isProcessingFrame = false;
+      }
+    } else {
+      if (!isProcessingFrame && elements.video.readyState >= 2) {
+        isProcessingFrame = true;
+        await captureAndSendBackendFrame();
+        isProcessingFrame = false;
+      }
+    }
+    requestAnimationFrame(frameStep);
+  }
+  requestAnimationFrame(frameStep);
+}
+
+function calculateFPS() {
+  const now = performance.now();
+  state.fpsCounter.frames++;
+  if (now - state.fpsCounter.lastTime >= 1000) {
+    state.fpsCounter.fps = Math.round(
+      (state.fpsCounter.frames * 1000) / (now - state.fpsCounter.lastTime)
+    );
+    elements.fpsBadge.textContent = `${state.fpsCounter.fps} FPS`;
+    state.fpsCounter.frames = 0;
+    state.fpsCounter.lastTime = now;
+  }
+}
+
+async function onMediaPipeResults(results) {
+  const ctx = elements.canvas.getContext("2d");
+  ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+    elements.handStatusBadge.textContent = "No Hand Detected";
+    elements.handStatusBadge.style.color = "";
+    updatePredictionDisplay({ sign: "---", confidence: 0.0, candidates: [] }, { stability_ratio: 0.0 });
+    return;
+  }
+
+  elements.handStatusBadge.textContent = "Hand Tracked ✓";
+  elements.handStatusBadge.style.color = "#5a8a60";
+
+  const landmarks = results.multiHandLandmarks[0];
+  drawHandLandmarks(ctx, landmarks, elements.canvas.width, elements.canvas.height);
+
+  try {
+    const resp = await fetch("/api/recognize/landmarks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        landmarks: landmarks,
+        confidence_threshold: state.confidenceThreshold
+      })
+    });
+    const data = await resp.json();
+    handlePredictionResult(data);
+  } catch (err) {
+    console.error("Classification error:", err);
+  }
+}
+
+async function captureAndSendBackendFrame() {
+  const tmp = document.createElement("canvas");
+  tmp.width = 320; tmp.height = 240;
+  tmp.getContext("2d").drawImage(elements.video, 0, 0, 320, 240);
+  const dataUrl = tmp.toDataURL("image/jpeg", 0.7);
+
+  try {
+    const resp = await fetch("/api/recognize/frame", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_base64: dataUrl, confidence_threshold: state.confidenceThreshold })
+    });
+    const data = await resp.json();
+    const ctx = elements.canvas.getContext("2d");
+    ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+
+    if (data.hand_detected && data.landmarks_pixel) {
+      elements.handStatusBadge.textContent = "Hand Tracked (Backend) ✓";
+      elements.handStatusBadge.style.color = "#5a8a60";
+      drawPixelLandmarks(ctx, data.landmarks_pixel, data.bbox);
+    } else {
+      elements.handStatusBadge.textContent = "No Hand Detected";
+    }
+    handlePredictionResult(data);
+  } catch (err) {
+    console.error("Backend frame recognition error:", err);
+  }
+}
+
+
+/* ════════════════════════════════════════════════════════════════
+   4. Canvas Landmark Drawing
+════════════════════════════════════════════════════════════════ */
+
+function drawHandLandmarks(ctx, landmarks, width, height) {
+  const pts = landmarks.map(lm => ({ x: lm.x * width, y: lm.y * height }));
+
+  ctx.lineWidth = 2.6;
+  ctx.lineCap = "round";
+  HAND_CONNECTIONS.forEach(([i, j]) => {
+    let c = FINGER_COLORS.palm;
+    if (i <= 4 && j <= 4)       c = FINGER_COLORS.thumb;
+    else if (i >= 5 && j <= 8)  c = FINGER_COLORS.index;
+    else if (i >= 9 && j <= 12) c = FINGER_COLORS.middle;
+    else if (i >= 13 && j <= 16)c = FINGER_COLORS.ring;
+    else if (i >= 17 && j <= 20)c = FINGER_COLORS.pinky;
+    ctx.strokeStyle = c;
+    ctx.beginPath();
+    ctx.moveTo(pts[i].x, pts[i].y);
+    ctx.lineTo(pts[j].x, pts[j].y);
+    ctx.stroke();
+  });
+
+  pts.forEach((pt, idx) => {
+    const isTip = [4, 8, 12, 16, 20].includes(idx);
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, isTip ? 5.2 : 3.6, 0, 2 * Math.PI);
+    ctx.fillStyle = isTip ? "#a44a3f" : "#f6f4d2";
+    ctx.fill();
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = "rgba(0,0,0,0.3)";
+    ctx.stroke();
+  });
+}
+
+function drawPixelLandmarks(ctx, pixelPoints, bbox) {
+  const sx = elements.canvas.width / 320;
+  const sy = elements.canvas.height / 240;
+
+  ctx.lineWidth = 3;
+  ctx.lineCap = "round";
+  HAND_CONNECTIONS.forEach(([i, j]) => {
+    ctx.strokeStyle = "#a44a3f";
+    ctx.beginPath();
+    ctx.moveTo(pixelPoints[i][0] * sx, pixelPoints[i][1] * sy);
+    ctx.lineTo(pixelPoints[j][0] * sx, pixelPoints[j][1] * sy);
+    ctx.stroke();
+  });
+
+  pixelPoints.forEach(pt => {
+    ctx.beginPath();
+    ctx.arc(pt[0] * sx, pt[1] * sy, 5, 0, 2 * Math.PI);
+    ctx.fillStyle = "#cbdfbd";
+    ctx.fill();
+  });
+}
+
+
+/* ════════════════════════════════════════════════════════════════
+   5. Prediction & Text Accumulator
+════════════════════════════════════════════════════════════════ */
+
+function handlePredictionResult(data) {
+  if (!data || !data.prediction) return;
+  const pred = data.prediction;
+  const stab = data.stabilizer || {};
+  updatePredictionDisplay(pred, stab);
+  if (stab.committed_action) flashCommittedSign(stab.committed_action);
+  if (stab.text_state) updateWorkspaceBuffer(stab.text_state);
+}
+
+function updatePredictionDisplay(pred, stab) {
+  const sign     = (stab && stab.active_sign && stab.active_sign !== "NONE") ? stab.active_sign : (pred.sign || "---");
+  const conf     = pred.confidence || 0.0;
+  const progress = stab.stability_ratio || 0.0;
+  const isLocked = stab.is_locked || false;
+
+  elements.predictedChar.textContent   = sign;
+  elements.confidencePct.textContent   = `${(conf * 100).toFixed(0)}%`;
+  elements.stabilityPct.textContent    = isLocked ? "100%" : `${Math.round(progress * 100)}%`;
+
+  if (elements.holdRingCircle) {
+    const circumference = 226;
+    elements.holdRingCircle.style.strokeDashoffset = circumference * (1 - Math.min(1.0, progress));
+    isLocked
+      ? elements.holdRingCircle.classList.add("locked")
+      : elements.holdRingCircle.classList.remove("locked");
+  }
+
+  if (elements.holdStatusLabel) {
+    if (isLocked) {
+      elements.holdStatusLabel.textContent = "✓ Recorded — release to sign next";
+      elements.holdStatusLabel.className   = "hold-status-pill locked";
+    } else if (progress > 0.15) {
+      elements.holdStatusLabel.textContent = `Holding… ${Math.round(progress * 100)}%`;
+      elements.holdStatusLabel.className   = "hold-status-pill holding";
+    } else {
+      elements.holdStatusLabel.textContent = "Ready";
+      elements.holdStatusLabel.className   = "hold-status-pill";
+    }
+  }
+
+  if (pred.candidates && pred.candidates.length > 0) {
+    elements.candidatesContainer.innerHTML = pred.candidates.map(c =>
+      `<span class="candidate-chip"><strong>${c.sign}</strong>: ${(c.confidence * 100).toFixed(0)}%</span>`
+    ).join("");
+  }
+}
+
+function renderQuickAlphabetStrip() {
+  const strip = document.getElementById("quick-alphabet-strip");
+  if (!strip) return;
+  strip.innerHTML = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map(l =>
+    `<button class="quick-letter-btn" onclick="window.testSignLetter('${l}')">${l}</button>`
+  ).join("");
+}
+
+async function commitCurrentSign() {
+  const currentSign = elements.predictedChar.textContent.trim();
+  if (currentSign && currentSign !== "---" && currentSign !== "NONE" && currentSign !== "UNCERTAIN") {
+    try {
+      const res  = await fetch("/api/buffer/commit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: currentSign })
+      });
+      const data = await res.json();
+      updateWorkspaceBuffer(data);
+      flashCommittedSign(currentSign);
+    } catch (e) {
+      console.error("Manual commit error:", e);
+    }
+  }
+}
+
+function playCommitChime() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.08);
+    gain.gain.setValueAtTime(0.12, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.09);
+  } catch (e) {}
+}
+
+function flashCommittedSign(sign) {
+  playCommitChime();
+  elements.predictedChar.style.transform   = "scale(1.12)";
+  elements.predictedChar.style.borderColor = "#cbdfbd";
+  elements.predictedChar.style.color       = "#5a8a60";
+  elements.charStreamTokens.style.borderColor = "#cbdfbd";
+  setTimeout(() => {
+    elements.predictedChar.style.transform   = "";
+    elements.predictedChar.style.borderColor = "";
+    elements.predictedChar.style.color       = "";
+    elements.charStreamTokens.style.borderColor = "";
+  }, 220);
+}
+
+function updateWorkspaceBuffer(textState) {
+  if (textState.char_stream && textState.char_stream.length > 0) {
+    elements.charStreamTokens.innerHTML = textState.char_stream.map(ch => {
+      if (ch === " ") return `<span class="char-token space">␣</span>`;
+      return `<span class="char-token">${ch}</span>`;
+    }).join("");
+  } else {
+    elements.charStreamTokens.innerHTML =
+      `<span style="color: var(--text-dim); font-size: 0.88rem;">Hold ASL letter gestures stably to register letters...</span>`;
+  }
+  if (document.activeElement !== elements.fullTextInput) {
+    elements.fullTextInput.value = textState.full_text || "";
+  }
+}
+
+
+/* ════════════════════════════════════════════════════════════════
+   6. Buffer Controls & Demo
+════════════════════════════════════════════════════════════════ */
+
+function setupBufferActions() {
+  elements.actionSpaceBtn.addEventListener("click", async () => {
+    const data = await (await fetch("/api/buffer/space", { method: "POST" })).json();
+    updateWorkspaceBuffer(data);
+  });
+
+  elements.actionBackspaceBtn.addEventListener("click", async () => {
+    const data = await (await fetch("/api/buffer/backspace", { method: "POST" })).json();
+    updateWorkspaceBuffer(data);
+  });
+
+  elements.actionClearBtn.addEventListener("click", async () => {
+    const data = await (await fetch("/api/buffer/clear", { method: "POST" })).json();
+    updateWorkspaceBuffer(data);
+    elements.refinedResultCard.style.display = "none";
+  });
+
+  const DEMO_SEQUENCES = [
+    "N E D   D O C T E R   W H E R E   H O S P I T A L",
+    "H E L O   M Y   N A M E   A L E X   N I C E   M E T   Y O U",
+    "W H A T   T I M E   M E T I N G   S T A R T",
+    "T H A N K   Y O U   F O R   H E L P",
+    "P L Z   W H E R E   R E S T R O M"
+  ];
+  let demoIdx = 0;
+
+  elements.demoPhraseBtn.addEventListener("click", async () => {
+    const seq  = DEMO_SEQUENCES[demoIdx % DEMO_SEQUENCES.length];
+    demoIdx++;
+    const data = await (await fetch("/api/buffer/set", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: seq })
+    })).json();
+    updateWorkspaceBuffer(data);
+  });
+}
+
+
+/* ════════════════════════════════════════════════════════════════
+   7. Generative AI Refinement
+════════════════════════════════════════════════════════════════ */
+
+function setupGenerativeAiActions() {
+  // Style chips
+  elements.styleChips.forEach(chip => {
+    chip.addEventListener("click", () => {
+      elements.styleChips.forEach(c => c.classList.remove("active"));
+      chip.classList.add("active");
+      state.selectedStyle = chip.getAttribute("data-style");
+    });
+  });
+
+  // Refine with AI
+  elements.refineAiBtn.addEventListener("click", async () => {
+    const rawText = elements.fullTextInput.value.trim();
+    if (!rawText) { alert("Please assemble or type some sign tokens first."); return; }
+
+    elements.refineAiBtn.disabled = true;
+    elements.refineAiBtn.innerHTML = `<span>⏳</span> Refining…`;
+
+    try {
+      const resp = await fetch("/api/refine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raw_text: rawText, style: state.selectedStyle, context: [] })
+      });
+      const result = await resp.json();
+      displayRefinedResult(result);
+
+      await fetch("/api/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          raw_text: result.raw_text,
+          refined_text: result.refined_text,
+          style: result.style,
+          provider: result.provider
+        })
+      });
+      loadTranslationHistory();
+
+    } catch (err) {
+      console.error("Refine error:", err);
+      alert("Error refining text: " + err.message);
+    } finally {
+      elements.refineAiBtn.disabled = false;
+      elements.refineAiBtn.innerHTML = `<span>✨</span> Refine with Generative AI`;
+    }
+  });
+
+  // Copy refined text
+  elements.copyRefinedBtn.addEventListener("click", () => {
+    const txt = elements.refinedTextContent.textContent.trim();
+    navigator.clipboard.writeText(txt);
+    elements.copyRefinedBtn.textContent = "✓";
+    setTimeout(() => { elements.copyRefinedBtn.textContent = "📋"; }, 1500);
+  });
+
+  // Speak refined text
+  elements.speakRefinedBtn.addEventListener("click", () => {
+    speakText(elements.refinedTextContent.textContent.trim());
+  });
+}
+
+function displayRefinedResult(result) {
+  elements.refinedResultCard.style.display  = "flex";
+  elements.refinedTextContent.textContent   = result.refined_text;
+  elements.activeLlmTag.textContent         = result.provider;
+
+  if (result.suggestions && result.suggestions.length > 0) {
+    elements.replyChipsList.innerHTML = result.suggestions.map(s =>
+      `<div class="suggestion-chip" onclick="window.speakSuggestion('${escapeHtml(s)}')">
+        <span>${s}</span>
+        <span style="font-size: 0.8rem; color: var(--text-muted);">🔊 Speak</span>
+      </div>`
+    ).join("");
+  } else {
+    elements.replyChipsList.innerHTML =
+      `<span style="font-size: 0.8rem; color: var(--text-dim);">No quick suggestions generated.</span>`;
+  }
+}
+
+window.speakSuggestion = function(text) { speakText(text); };
+
+function escapeHtml(text) {
+  return text.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+
+/* ════════════════════════════════════════════════════════════════
+   8. Text-To-Speech
+════════════════════════════════════════════════════════════════ */
+
+function setupSpeechVoices() {
+  function populateVoices() {
+    if ("speechSynthesis" in window) {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length > 0) {
+        elements.settingTtsVoice.innerHTML = voices
+          .filter(v => v.lang.startsWith("en"))
+          .map(v => `<option value="${v.name}">${v.name} (${v.lang})</option>`)
+          .join("");
+      }
+    }
+  }
+  populateVoices();
+  if ("speechSynthesis" in window) window.speechSynthesis.onvoiceschanged = populateVoices;
+}
+
+function speakText(text) {
+  if (!text) return;
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
+    const utt   = new SpeechSynthesisUtterance(text);
+    utt.rate    = 1.0;
+    utt.pitch   = 1.0;
+    const voices = window.speechSynthesis.getVoices();
+    const sel   = voices.find(v => v.name === state.selectedVoice);
+    if (sel) utt.voice = sel;
+    window.speechSynthesis.speak(utt);
+  }
+  fetch("/api/tts/speak", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, voice: state.selectedVoice, rate: 175 })
+  }).catch(console.error);
+}
+
+
+/* ════════════════════════════════════════════════════════════════
+   9. Evaluation & Metrics Dashboard
+════════════════════════════════════════════════════════════════ */
+
+async function loadEvaluationMetrics() {
+  try {
+    const resp = await fetch("/api/metrics");
+    const data = await resp.json();
+    if (!data.overall) return;
+    elements.metricAccuracy.textContent  = `${(data.overall.accuracy * 100).toFixed(2)}%`;
+    elements.metricPrecision.textContent = `${(data.overall.macro_precision * 100).toFixed(2)}%`;
+    elements.metricRecall.textContent    = `${(data.overall.macro_recall * 100).toFixed(2)}%`;
+    elements.metricF1.textContent        = `${(data.overall.macro_f1 * 100).toFixed(2)}%`;
+    elements.metricLatency.textContent   = `${data.overall.inference_latency_ms.toFixed(3)} ms`;
+    renderConfusionMatrix(data);
+    renderPerClassTable(data);
+  } catch (err) {
+    console.error("Metrics load error:", err);
+  }
+}
+
+function renderConfusionMatrix(data) {
+  const classes = data.classes;
+  const cmNorm  = data.confusion_matrix_normalized;
+  if (!classes || !cmNorm) return;
+  const n = classes.length;
+  let html = `<div style="display: grid; grid-template-columns: 40px repeat(${n}, 26px); gap: 2px; align-items: center; justify-content: start;">
+    <div></div>
+    ${classes.map(c =>
+      `<div style="font-size:0.65rem;font-weight:700;text-align:center;color:var(--terracotta);">${c}</div>`
+    ).join("")}`;
+
+  for (let i = 0; i < n; i++) {
+    html += `<div style="font-size:0.65rem;font-weight:700;text-align:right;padding-right:4px;color:var(--terracotta);">${classes[i]}</div>`;
+    for (let j = 0; j < n; j++) {
+      const val = cmNorm[i][j];
+      const isDiag = i === j;
+      const bg = isDiag
+        ? `rgba(164, 74, 63, ${Math.max(0.15, val)})`
+        : val > 0.05 ? `rgba(241, 156, 121, ${val * 1.5})` : `rgba(203, 223, 189, 0.1)`;
+      html += `<div class="matrix-cell" style="background:${bg};" title="True: ${classes[i]}, Pred: ${classes[j]} (${(val*100).toFixed(1)}%)">
+        ${isDiag ? (val*100).toFixed(0) : (val > 0.1 ? (val*100).toFixed(0) : "")}
+      </div>`;
+    }
+  }
+  html += `</div>`;
+  elements.confusionMatrixContainer.innerHTML = html;
+}
+
+function renderPerClassTable(data) {
+  const perClass = data.per_class;
+  if (!perClass) return;
+  elements.perClassTbody.innerHTML = Object.keys(perClass).map(cls => {
+    const item = perClass[cls];
+    return `<tr>
+      <td style="font-weight:700; color:var(--terracotta);">${cls}</td>
+      <td>${(item.precision * 100).toFixed(1)}%</td>
+      <td>${(item.recall * 100).toFixed(1)}%</td>
+      <td style="color:var(--accent-success); font-weight:600;">${(item.f1_score * 100).toFixed(1)}%</td>
+      <td style="color:var(--text-muted);">${item.support}</td>
+    </tr>`;
+  }).join("");
+}
+
+
+/* ════════════════════════════════════════════════════════════════
+   10. ASL Alphabet Guide (with real photos)
+════════════════════════════════════════════════════════════════ */
+
+function renderAlphabetGuide() {
+  const letters = Object.keys(ASL_GUIDE_DATA);
+  elements.alphabetGridContainer.innerHTML = letters.map(letter => {
+    const desc    = ASL_GUIDE_DATA[letter];
+    const imgUrl  = ASL_IMAGE_URLS[letter];
+    const imgHtml = imgUrl
+      ? `<img
+           src="${imgUrl}"
+           alt="ASL sign for ${letter}"
+           loading="lazy"
+           onerror="this.style.display='none'"
+         />`
+      : "";
+    return `
+      <div class="letter-card" onclick="window.testSignLetter('${letter}')">
+        ${imgHtml}
+        <div class="letter-badge-lg">${letter}</div>
+        <div class="letter-desc">${desc}</div>
+      </div>
+    `;
+  }).join("");
+}
+
+window.testSignLetter = function(letter) {
+  fetch("/api/buffer/set", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: (elements.fullTextInput.value + " " + letter).trim() })
+  }).then(r => r.json()).then(updateWorkspaceBuffer);
+};
+
+
+/* ════════════════════════════════════════════════════════════════
+   11. Translation History
+════════════════════════════════════════════════════════════════ */
+
+async function loadTranslationHistory() {
+  try {
+    const resp = await fetch("/api/history");
+    const data = await resp.json();
+    state.translationHistory = data.history || [];
+
+    if (state.translationHistory.length === 0) {
+      elements.historyListContainer.innerHTML =
+        `<p style="color: var(--text-dim); font-size: 0.9rem;">No translation records yet. Refine a sentence in the studio to start logging history.</p>`;
+      return;
+    }
+
+    elements.historyListContainer.innerHTML = state.translationHistory.map(item => `
+      <div class="history-entry">
+        <div style="display:flex; flex-direction:column; gap:5px; flex:1;">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <span style="font-size:0.72rem; color:var(--text-dim);">${item.timestamp}</span>
+            <span class="provider-tag">${item.style}</span>
+            <span style="font-size:0.72rem; color:var(--text-muted); font-weight:600;">${item.provider}</span>
+          </div>
+          <div style="font-size:0.82rem; color:var(--text-muted);">Signs: <code style="background:var(--bg-surface-elevated); padding:1px 5px; border-radius:4px;">${item.raw_text}</code></div>
+          <div style="font-size:1rem; font-weight:600; color:var(--text-primary);">${item.refined_text}</div>
+        </div>
+        <button class="btn-icon" onclick="window.speakHistory('${escapeHtml(item.refined_text)}')" title="Speak">🔊</button>
+      </div>
+    `).join("");
+  } catch (err) {
+    console.error("History load error:", err);
+  }
+}
+
+window.speakHistory = function(text) { speakText(text); };
+
+elements.clearHistoryBtn.addEventListener("click", async () => {
+  await fetch("/api/history", { method: "DELETE" });
+  loadTranslationHistory();
+});
+
+elements.exportHistoryBtn.addEventListener("click", () => {
+  const blob = new Blob([JSON.stringify(state.translationHistory, null, 2)], { type: "application/json" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = `signet_history_${Date.now()}.json`;
+  a.click();
+});
+
+
+/* ════════════════════════════════════════════════════════════════
+   12. System Status & Settings Modal
+════════════════════════════════════════════════════════════════ */
+
+async function loadSystemStatus() {
+  try {
+    const resp = await fetch("/api/status");
+    const data = await resp.json();
+    if (data.gemini_active) {
+      elements.geminiDot.classList.remove("inactive");
+      elements.geminiStatus.textContent = `Gemini: Online (${data.llm_model})`;
+    } else {
+      elements.geminiDot.classList.add("inactive");
+      elements.geminiStatus.textContent = "AI Engine: Offline Rules";
+    }
+    state.confidenceThreshold = data.confidence_threshold;
+    state.stabilityFrames     = data.stability_frames;
+    elements.settingConfThreshold.value  = data.confidence_threshold;
+    elements.confValLabel.textContent    = data.confidence_threshold;
+    elements.settingStabilityFrames.value = data.stability_frames;
+    elements.stabValLabel.textContent    = data.stability_frames;
+  } catch (e) {
+    console.error("Status fetch error:", e);
+  }
+}
+
+function setupSettingsModal() {
+  elements.openSettingsBtn.addEventListener("click", () => elements.settingsModal.classList.add("open"));
+  const closeModal = () => elements.settingsModal.classList.remove("open");
+  elements.closeSettingsBtn.addEventListener("click", closeModal);
+  elements.cancelSettingsBtn.addEventListener("click", closeModal);
+
+  elements.settingConfThreshold.addEventListener("input", (e) => {
+    elements.confValLabel.textContent = e.target.value;
+  });
+  elements.settingStabilityFrames.addEventListener("input", (e) => {
+    elements.stabValLabel.textContent = e.target.value;
+  });
+
+  elements.saveSettingsBtn.addEventListener("click", async () => {
+    const newKey   = elements.settingGeminiKey.value.trim();
+    const newConf  = parseFloat(elements.settingConfThreshold.value);
+    const newStab  = parseInt(elements.settingStabilityFrames.value, 10);
+    const newVoice = elements.settingTtsVoice.value;
+    state.selectedVoice = newVoice;
+
+    const payload = { confidence_threshold: newConf, stability_frames: newStab };
+    if (newKey) payload.gemini_api_key = newKey;
+
+    try {
+      await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      loadSystemStatus();
+      closeModal();
+    } catch (e) {
+      alert("Error saving settings: " + e.message);
+    }
+  });
+}

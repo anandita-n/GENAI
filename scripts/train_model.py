@@ -33,6 +33,33 @@ from app.config import (
 from app.asl_dataset import ASLKinematics
 
 
+REAL_SAMPLE_WEIGHT = 5.0  # real webcam recordings count more than synthetic samples
+
+
+def load_real_recordings():
+    """
+    Loads real landmark recordings made with scripts/record_landmarks.py
+    (data/recorded_<SIGN>_<timestamp>.json). Returns (X, y) or (None, None).
+    """
+    X_list, y_list = [], []
+    for path in sorted(DATA_DIR.glob("recorded_*.json")):
+        try:
+            with open(path, "r") as f:
+                rec = json.load(f)
+            sign = str(rec["sign"]).upper()
+            if sign not in ALL_CLASSES:
+                continue
+            for feats in rec["features"]:
+                if len(feats) == 83:
+                    X_list.append(feats)
+                    y_list.append(sign)
+        except Exception as e:
+            print(f"Skipping unreadable recording {path.name}: {e}")
+    if not X_list:
+        return None, None
+    return np.array(X_list, dtype=np.float32), np.array(y_list)
+
+
 def train_and_evaluate(samples_per_class: int = 500):
     print(f"==================================================")
     print(f" SignBridge AI - Classifier Training & Evaluation ")
@@ -54,6 +81,27 @@ def train_and_evaluate(samples_per_class: int = 500):
     )
     print(f"Training set: {X_train.shape[0]} samples | Test set: {X_test.shape[0]} samples")
 
+    # Real webcam recordings (optional): part goes into training with a higher
+    # weight, the rest is held out to measure real-world accuracy honestly.
+    sample_weight = np.ones(len(X_train), dtype=np.float32)
+    X_real_test, y_real_test = None, None
+    X_real, y_real_raw = load_real_recordings()
+    if X_real is not None:
+        y_real = le.transform(y_real_raw)
+        X_real_train, X_real_test, y_real_train, y_real_test = train_test_split(
+            X_real, y_real, test_size=0.25, random_state=42
+        )
+        print(f"Real recordings: {len(X_real)} samples "
+              f"({len(X_real_train)} train / {len(X_real_test)} held-out test)")
+        X_train = np.vstack([X_train, X_real_train])
+        y_train = np.concatenate([y_train, y_real_train])
+        sample_weight = np.concatenate(
+            [sample_weight, np.full(len(X_real_train), REAL_SAMPLE_WEIGHT, dtype=np.float32)]
+        )
+    else:
+        print("No real recordings found in data/. Training on synthetic data only "
+              "(record real signs with scripts/record_landmarks.py to improve real-world accuracy).")
+
     # Feature Scaling
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -69,7 +117,13 @@ def train_and_evaluate(samples_per_class: int = 500):
         n_jobs=-1,
         random_state=42
     )
-    clf.fit(X_train_scaled, y_train)
+    clf.fit(X_train_scaled, y_train, sample_weight=sample_weight)
+
+    real_world_metrics = None
+    if X_real_test is not None and len(X_real_test) > 0:
+        real_acc = float(accuracy_score(y_real_test, clf.predict(scaler.transform(X_real_test))))
+        real_world_metrics = {"accuracy": round(real_acc, 4), "test_samples": int(len(X_real_test))}
+        print(f"Real-world held-out accuracy: {real_acc * 100:.2f}% ({len(X_real_test)} samples)")
 
     # Evaluation on Test Set
     print("\n--- Evaluating Model on Test Set ---")
@@ -122,6 +176,7 @@ def train_and_evaluate(samples_per_class: int = 500):
             }
             for cls_name in class_names
         },
+        "real_world": real_world_metrics,
         "confusion_matrix": cm.tolist(),
         "confusion_matrix_normalized": np.round(cm_normalized, 4).tolist()
     }

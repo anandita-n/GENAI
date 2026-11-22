@@ -7,7 +7,10 @@ from app.llm_engine import LLMEngine
 class TestLLMEngine(unittest.TestCase):
 
     def setUp(self):
-        self.engine = LLMEngine()
+        # Offline engine: tests must not depend on a real API key or network quota.
+        self.engine = LLMEngine(api_key="")
+        self.engine.api_key = ""
+        self.engine.client = None
 
     def test_refine_medical_styles(self):
         raw = "N E D   D O C T E R   W H E R E   H O S P I T A L"

@@ -75,6 +75,13 @@ Raw fingerspelling streams are often telegraphic, missing functional grammar, or
 - **Context-Aware Two-Way Replies**: Generates three dynamic suggested responses for the hearing conversation partner, accelerating conversation pace.
 - **Dual-Mode Execution**: Powered by Google Gemini 2.5 Flash (`google-genai`), backed by a built-in offline linguistic grammar and spell-correction engine so the system works even without an internet connection or API key.
 
+### 3b. Vision-Language Model Image Captioning (`app/vision_engine.py`)
+- The **Caption This Sign** button sends the current camera frame, plus the classifier's top-3 candidate letters, to a vision-language model (Gemini 2.5 Flash).
+- The VLM returns a natural-language **caption** of the handshape (which fingers are extended or curled, thumb position), chooses the letter that actually matches the image, and explains why. This resolves look-alike signs such as M/N, U/V and K/P.
+- A MediaPipe **hand check** runs first, so empty frames are never sent to the VLM (it can otherwise invent a hand).
+- With no `GEMINI_API_KEY` set, or if the call fails (e.g. free-tier rate limit), an offline caption is built from the classifier's top guess.
+- Set the key in a git-ignored `.env` file: `GEMINI_API_KEY=your-key`.
+
 ### 4. Interaction Layer & Speech Synthesis
 - **Interactive Single-Page Application**: Sleek dark-mode interface with live MediaPipe skeleton overlay, real-time prediction badges, confidence gauges, and inline editable text buffer.
 - **Audible Text-to-Speech (TTS)**: Dual-tier audio output utilizing the zero-latency browser Web Speech Synthesis API and host audio engines (`say` / `pyttsx3`).
@@ -112,6 +119,7 @@ signbridge-ai/
 │   ├── asl_dataset.py        # Biomechanical 3D kinematic model & dataset synthesizer
 │   ├── gesture_classifier.py # ML inference & temporal stabilization engine
 │   ├── llm_engine.py         # Generative AI, prompt engineering & grammar repair
+│   ├── vision_engine.py      # VLM image captioning & sign disambiguation (Gemini)
 │   ├── tts_engine.py         # Text-to-speech audio synthesis engine
 │   ├── main.py               # FastAPI application server & REST/WebSocket routes
 │   └── static/               # Interactive Single-Page Application (SPA)
@@ -226,6 +234,7 @@ All 18 unit and integration tests pass cleanly in under 0.5 seconds.
 | `POST`| `/api/buffer/backspace` | Deletes the last character or word. |
 | `POST`| `/api/buffer/clear` | Clears all text buffers. |
 | `POST`| `/api/buffer/set` | Manually sets or edits the full text accumulator. |
+| `POST`| `/api/caption` | Vision-language image captioning: describes the hand sign in a camera frame and picks the most likely letter from the classifier's candidates (Gemini VLM, with a hand-detection gate and offline fallback). |
 | `POST`| `/api/refine` | Transforms raw sign tokens into styled, grammatical English via Generative AI. |
 | `POST`| `/api/chat/reply` | Generates 3 contextual conversational response suggestions. |
 | `POST`| `/api/tts/speak` | Triggers audible speech synthesis. |

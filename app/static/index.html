@@ -132,6 +132,26 @@
               </select>
             </div>
           </div>
+
+          <!-- Vision-Language Model: Image Captioning -->
+          <div class="caption-panel" style="margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border, rgba(128,128,128,0.25));">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+              <h3 style="font-size: 0.95rem; margin: 0;"><span>🖼️</span> Image Caption (VLM)</h3>
+              <button class="btn-primary" id="caption-sign-btn" style="padding: 6px 14px; font-size: 0.8rem;">
+                Caption This Sign
+              </button>
+            </div>
+            <div id="caption-result" style="display: none; margin-top: 10px; font-size: 0.88rem; line-height: 1.5;">
+              <p id="caption-text" style="margin: 0 0 6px 0; font-style: italic;"></p>
+              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <span class="candidate-chip">VLM says: <strong id="caption-vlm-sign">-</strong></span>
+                <span class="candidate-chip" id="caption-agreement">-</span>
+                <button class="btn-secondary" id="caption-use-btn" style="padding: 4px 10px; font-size: 0.75rem;">Use this letter</button>
+              </div>
+              <p id="caption-reasoning" style="margin: 6px 0 0 0; color: var(--text-muted); font-size: 0.8rem;"></p>
+              <p id="caption-provider" style="margin: 4px 0 0 0; color: var(--text-muted); font-size: 0.72rem;"></p>
+            </div>
+          </div>
         </div>
 
         <!-- Right Column: Accumulator & Generative AI Refiner -->

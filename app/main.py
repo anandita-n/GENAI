@@ -33,6 +33,7 @@ from app.landmark_extractor import LandmarkExtractor
 from app.gesture_classifier import GestureClassifier, TemporalStabilizer
 from app.llm_engine import LLMEngine
 from app.tts_engine import TTSEngine
+from app.vision_engine import VisionEngine
 
 app = FastAPI(
     title="SignBridge AI API",
@@ -56,6 +57,7 @@ stabilizer = TemporalStabilizer(
     confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD
 )
 llm_engine = LLMEngine()
+vision_engine = VisionEngine(llm_engine)
 tts_engine = TTSEngine()
 
 # In-memory translation history
@@ -75,6 +77,10 @@ class RecognizeLandmarksRequest(BaseModel):
 class FrameRecognizeRequest(BaseModel):
     image_base64: str  # JPEG/PNG data URL or raw base64
     confidence_threshold: Optional[float] = DEFAULT_CONFIDENCE_THRESHOLD
+
+class CaptionRequest(BaseModel):
+    image_base64: str  # JPEG/PNG data URL or raw base64
+    candidates: Optional[List[Dict[str, Any]]] = None  # classifier top-k: [{"sign": "M", "confidence": 0.6}]
 
 class RefineRequest(BaseModel):
     raw_text: str
@@ -207,6 +213,41 @@ def recognize_frame(req: FrameRecognizeRequest):
         "prediction": pred,
         "stabilizer": stab_res
     }
+
+
+@app.post("/api/caption")
+def caption_sign_image(req: CaptionRequest):
+    """
+    Vision-language image captioning: describes the hand sign in the frame and
+    picks the most likely letter from the classifier's candidates.
+    """
+    try:
+        img_data = req.image_base64
+        mime_type = "image/jpeg"
+        if img_data.startswith("data:"):
+            mime_type = img_data.split(";")[0][5:] or mime_type
+        if "base64," in img_data:
+            img_data = img_data.split("base64,")[1]
+        image_bytes = base64.b64decode(img_data)
+        if not image_bytes:
+            raise ValueError("empty image")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image format: {e}")
+
+    # Hand gate: if MediaPipe finds no hand in a decodable frame, don't ask the VLM
+    # (it can hallucinate a hand on empty frames, and this saves API quota).
+    frame_bgr = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if frame_bgr is not None and not landmark_extractor.extract_from_frame(frame_bgr):
+        return {
+            "caption": "No hand detected in the frame. Hold your hand up clearly in view of the camera.",
+            "vlm_sign": "NONE",
+            "agrees_with_classifier": False,
+            "reasoning": "The MediaPipe hand detector found no hand, so the vision-language model was not called.",
+            "candidates": req.candidates or [],
+            "provider": "SignBridge hand check",
+        }
+
+    return vision_engine.caption_sign(image_bytes, req.candidates, mime_type=mime_type)
 
 
 # --- Text Buffer Management ---

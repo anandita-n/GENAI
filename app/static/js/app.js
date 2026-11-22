@@ -492,7 +492,8 @@ function handlePredictionResult(data) {
 }
 
 function updatePredictionDisplay(pred, stab) {
-  const sign     = (stab && stab.active_sign && stab.active_sign !== "NONE") ? stab.active_sign : (pred.sign || "---");
+  state.lastPrediction = pred;
+  const sign    = (stab && stab.active_sign && stab.active_sign !== "NONE") ? stab.active_sign : (pred.sign || "---");
   const conf     = pred.confidence || 0.0;
   const progress = stab.stability_ratio || 0.0;
   const isLocked = stab.is_locked || false;
@@ -528,6 +529,80 @@ function updatePredictionDisplay(pred, stab) {
     ).join("");
   }
 }
+
+/* ════════════════════════════════════════════════════════════════
+   Vision-Language Model: Image Captioning
+════════════════════════════════════════════════════════════════ */
+
+function captureVideoFrame() {
+  const video = document.getElementById("webcam-video");
+  if (!video || !video.videoWidth) return null;
+  const canvas = document.createElement("canvas");
+  const scale = Math.min(1, 640 / video.videoWidth);
+  canvas.width  = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+  canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
+async function captionCurrentSign() {
+  const btn = document.getElementById("caption-sign-btn");
+  const frame = captureVideoFrame();
+  if (!frame) {
+    alert("Start the camera first, then hold up a sign.");
+    return;
+  }
+
+  const candidates = (state.lastPrediction && state.lastPrediction.candidates) || [];
+  btn.disabled = true;
+  btn.textContent = "Captioning…";
+  try {
+    const res = await fetch("/api/caption", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_base64: frame, candidates })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    document.getElementById("caption-text").textContent      = data.caption || "";
+    document.getElementById("caption-vlm-sign").textContent  = data.vlm_sign || "-";
+    document.getElementById("caption-agreement").textContent = data.agrees_with_classifier
+      ? "✓ agrees with classifier" : "≠ differs from classifier";
+    document.getElementById("caption-reasoning").textContent = data.reasoning || "";
+    document.getElementById("caption-provider").textContent  = data.provider || "";
+    document.getElementById("caption-result").style.display  = "block";
+  } catch (e) {
+    console.error("Caption error:", e);
+    alert("Could not caption the image. Is the server running?");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Caption This Sign";
+  }
+}
+
+async function useCaptionedLetter() {
+  const sign = document.getElementById("caption-vlm-sign").textContent.trim();
+  if (!sign || sign === "-" || sign === "NONE") return;
+  try {
+    const res = await fetch("/api/buffer/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: sign })
+    });
+    updateWorkspaceBuffer(await res.json());
+    flashCommittedSign(sign);
+  } catch (e) {
+    console.error("Use captioned letter error:", e);
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const capBtn = document.getElementById("caption-sign-btn");
+  const useBtn = document.getElementById("caption-use-btn");
+  if (capBtn) capBtn.addEventListener("click", captionCurrentSign);
+  if (useBtn) useBtn.addEventListener("click", useCaptionedLetter);
+});
 
 function renderQuickAlphabetStrip() {
   const strip = document.getElementById("quick-alphabet-strip");

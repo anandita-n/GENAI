@@ -34,6 +34,7 @@ from app.gesture_classifier import GestureClassifier, TemporalStabilizer
 from app.llm_engine import LLMEngine
 from app.tts_engine import TTSEngine
 from app.vision_engine import VisionEngine
+from app.motion_detector import MotionTracker
 
 app = FastAPI(
     title="SignBridge AI API",
@@ -60,8 +61,54 @@ llm_engine = LLMEngine()
 vision_engine = VisionEngine(llm_engine)
 tts_engine = TTSEngine()
 
+motion_tracker = MotionTracker()
+
+# Pose letters the stabilizer may have already committed while J / Z was being drawn.
+MOTION_BASE_LETTERS = {"J": {"I", "J"}, "Z": {"D", "G", "X", "L", "Z"}}
+
 # In-memory translation history
 TRANSLATION_HISTORY: List[Dict[str, Any]] = []
+
+
+def demote_motion_letters(pred: Dict[str, Any], threshold: float) -> Dict[str, Any]:
+    """J and Z involve movement, so a single frame can never confirm them.
+    Replace a static J/Z prediction with the best non-motion candidate."""
+    if pred.get("raw_sign") not in ("J", "Z"):
+        return pred
+    for cand in pred.get("candidates", []):
+        if cand["sign"] not in ("J", "Z"):
+            new = dict(pred)
+            new.update(
+                sign=cand["sign"],
+                raw_sign=cand["sign"],
+                confidence=cand["confidence"],
+                is_confident=cand["confidence"] >= threshold,
+            )
+            return new
+    return pred
+
+
+def process_with_motion(pred: Dict[str, Any], points, threshold: float):
+    """Runs the stabilizer plus the J/Z motion tracker. Returns (prediction, stabilizer result)."""
+    pred = demote_motion_letters(pred, threshold)
+    stab_res = stabilizer.process_prediction(pred)
+
+    motion_sign = motion_tracker.update(points)
+    if motion_sign:
+        # Undo the pose letter (I / pointing) committed while the motion was being drawn.
+        if (stabilizer.is_locked
+                and stabilizer.locked_sign in MOTION_BASE_LETTERS[motion_sign]
+                and time.time() - stabilizer.last_commit_time < 2.5):
+            stabilizer._apply_sign_action("DEL")
+        text_state = stabilizer.force_commit_sign(motion_sign)
+        stab_res.update(
+            committed_action=motion_sign,
+            text_state=text_state,
+            active_sign=motion_sign,
+            is_locked=True,
+        )
+        pred = {**pred, "sign": motion_sign, "raw_sign": motion_sign, "motion_detected": True}
+    return pred, stab_res
 
 
 # --- Request/Response Models ---
@@ -160,7 +207,8 @@ def recognize_landmarks(req: RecognizeLandmarksRequest):
 
     threshold = req.confidence_threshold or stabilizer.confidence_threshold
     pred = gesture_classifier.predict_raw_landmarks(req.landmarks, confidence_threshold=threshold)
-    stab_res = stabilizer.process_prediction(pred)
+    points = [(lm["x"], lm["y"]) for lm in req.landmarks]
+    pred, stab_res = process_with_motion(pred, points, threshold)
 
     if stab_res.get("committed_action"):
         print(f"[COMMITTED SIGN] ===> {stab_res['committed_action']} (Confidence: {pred['confidence']})")
@@ -191,6 +239,7 @@ def recognize_frame(req: FrameRecognizeRequest):
 
     extracted = landmark_extractor.extract_from_frame(frame_bgr)
     if not extracted:
+        motion_tracker.reset()
         return {
             "hand_detected": False,
             "prediction": {"sign": "NONE", "confidence": 0.0, "is_confident": False, "candidates": []},
@@ -199,7 +248,8 @@ def recognize_frame(req: FrameRecognizeRequest):
 
     threshold = req.confidence_threshold or stabilizer.confidence_threshold
     pred = gesture_classifier.predict_features(extracted["features"], confidence_threshold=threshold)
-    stab_res = stabilizer.process_prediction(pred)
+    points = [(pt[0], pt[1]) for pt in extracted["landmarks_pixel"]]
+    pred, stab_res = process_with_motion(pred, points, threshold)
 
     if stab_res.get("committed_action"):
         print(f"[COMMITTED SIGN] ===> {stab_res['committed_action']} (Confidence: {pred['confidence']})")
@@ -380,7 +430,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 threshold = data.get("confidence_threshold", stabilizer.confidence_threshold)
                 if len(raw_lms) == 21:
                     pred = gesture_classifier.predict_raw_landmarks(raw_lms, confidence_threshold=threshold)
-                    stab_res = stabilizer.process_prediction(pred)
+                    points = [(lm["x"], lm["y"]) for lm in raw_lms]
+                    pred, stab_res = process_with_motion(pred, points, threshold)
                     await websocket.send_json({
                         "type": "prediction_result",
                         "prediction": pred,

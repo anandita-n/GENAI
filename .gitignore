@@ -9,3 +9,6 @@ venv/
 node_modules/
 dist/
 build/
+# Real-data caches (re-create with scripts/import_hf_landmarks.py) and personal recordings
+data/real_hf/
+data/recorded_*.json

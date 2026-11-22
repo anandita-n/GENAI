@@ -2,7 +2,7 @@
 
 import unittest
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import app, llm_engine
 
 
 class TestSignBridgeAPI(unittest.TestCase):
@@ -10,6 +10,13 @@ class TestSignBridgeAPI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
+        # Tests must not depend on a real API key, the network or live-model wording.
+        cls._saved_llm_state = (llm_engine.api_key, llm_engine.client)
+        llm_engine.api_key, llm_engine.client = "", None
+
+    @classmethod
+    def tearDownClass(cls):
+        llm_engine.api_key, llm_engine.client = cls._saved_llm_state
 
     def test_status_endpoint(self):
         resp = self.client.get("/api/status")

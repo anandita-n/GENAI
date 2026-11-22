@@ -4,7 +4,7 @@
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688.svg)](https://fastapi.tiangolo.com)
 [![MediaPipe](https://img.shields.io/badge/MediaPipe-Tasks-FF6F00.svg)](https://developers.google.com/mediapipe)
-[![Evaluation Accuracy](https://img.shields.io/badge/Test%20Accuracy-98.14%25-success.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-41%20passing-success.svg)]()
 
 > Communication between Deaf and hearing individuals remains difficult because of language barriers and limited access to sign language interpreters. **SignBridge AI** is an intelligent, end-to-end communication assistant that integrates **computer vision, machine learning, and Generative Artificial Intelligence** to facilitate accessible, natural, and dignified two-way communication.
 
@@ -26,7 +26,7 @@ SignBridge AI combines three unified layers into a real-time, responsive assisti
                                      │
                                      ▼
                   [Machine Learning Classifier (Random Forest)]
-                  (98.14% Accuracy, Sub-Millisecond Latency)
+                  (Synthetic + real landmark data, Sub-Millisecond Latency)
                                      │
                                      ▼
               [Confidence Gating (≥ 0.65) & Temporal Stabilizer]
@@ -60,7 +60,8 @@ SignBridge AI combines three unified layers into a real-time, responsive assisti
 - Classifies 29 distinct gestures:
   - **All 26 ASL Alphabet Letters** ('A' through 'Z')
   - **Functional Gestures**: `SPACE`, `DEL` (backspace), and `CLEAR`
-- **Performance**: Achieves **98.14% Test Accuracy**, **98.13% Macro F1-Score**, and **0.009 ms inference latency** on 14,500 samples.
+- **Performance**: see [Evaluation Benchmark Results](#evaluation-benchmark-results-held-out-test-set-2900-synthetic-samples) below, including an honest note on synthetic vs. real-data accuracy.
+- **J and Z are motion letters.** A single frame cannot tell J from I or Z from a pointing finger, so `app/motion_detector.py` tracks the fingertip path (about 1.6 s): **J** = pinky-up handshape drawing a downward stroke plus a sideways hook, **Z** = pointing finger drawing right, diagonal down-left, right. The classifier alone never commits J or Z. These thresholds are heuristics tested on synthetic paths; tune them on your own camera.
 - **Confidence Gating**: Filters out low-confidence, ambiguous hand transitions.
 - **Temporal Debouncing & Majority Voting**: Requires a gesture to remain stable over a sliding window of frames before committing the character, eliminating jitter and accidental letter repetition.
 
@@ -198,15 +199,28 @@ To run the standalone benchmark verification on the test split:
 python scripts/evaluate_model.py
 ```
 
-### Evaluation Benchmark Results (Held-Out Test Set: 2,900 samples)
+### Training on real data (recommended)
+
+The classifier is trained on a synthetic kinematic dataset plus any **real** landmark recordings found in `data/`:
+
+```bash
+# Download + convert the public MIT-licensed sid220/asl-now-fingerspelling landmark dataset (~3 MB)
+python scripts/import_hf_landmarks.py
+# (optional) record your own: python scripts/record_landmarks.py A 60
+python scripts/train_model.py
+```
+
+Real recordings are weighted 5x and 25% of them are held out to report real-world accuracy separately.
+
+### Evaluation Benchmark Results (Held-Out Test Set: 2,900 synthetic samples)
 | Metric | Score |
 | :--- | :--- |
-| **Overall Test Accuracy** | **98.14%** |
-| **Macro Precision** | **98.13%** |
-| **Macro Recall** | **98.14%** |
-| **Macro F1-Score** | **98.13%** |
-| **Weighted F1-Score** | **98.13%** |
-| **Inference Latency** | **0.009 ms / frame** |
+| **Synthetic test accuracy** | **99.03%** |
+| **Macro F1-Score** | **99.03%** |
+| **Real-data held-out accuracy** (484 real samples) | **98.14%** |
+| **Inference Latency** | **~0.035 ms / frame** |
+
+> **Read this honestly.** The synthetic test set comes from the same generator as the training data, so it measures little about real people. A model trained on synthetic data **only** scored just **35.6%** on the 1,874 real samples from the Hugging Face dataset. The real-data number above comes from a *random* split of frames from the same recordings, so near-identical neighbouring frames leak between train and test and it is optimistic too. True accuracy on new signers is unknown and likely lower; the dataset has no signer IDs to split by.
 
 ---
 
@@ -216,7 +230,7 @@ Run the full automated test suite covering all units:
 ```bash
 python -m unittest discover tests
 ```
-All 18 unit and integration tests pass cleanly in under 0.5 seconds.
+All 41 unit and integration tests pass in a few seconds. The tests run offline (no API key or network needed).
 
 ---
 
